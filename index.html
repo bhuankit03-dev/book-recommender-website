@@ -31,13 +31,11 @@
         import { getFirestore, collection, query, limit, onSnapshot, serverTimestamp, orderBy, addDoc, doc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // IMPORTANT: These variables are required by the embedded React code.
-        // On a public deployment, you would replace this with your actual Firebase config.
         window.__app_id = "recommender-app-public-id";
         window.__firebase_config = JSON.stringify({}); // Placeholder: use your actual config object here
         window.__initial_auth_token = null; // We will default to anonymous sign-in
 
-        // Make Firebase functions available globally or pass them to the React component scope 
-        // through the standard window object for the script below to access.
+        // Make Firebase functions available globally
         window.firebase = { 
             initializeApp, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, 
             getFirestore, collection, query, limit, onSnapshot, serverTimestamp, orderBy, addDoc, doc
@@ -51,23 +49,22 @@
         window.useMemo = React.useMemo;
         window.useRef = React.useRef;
 
-        // NOTE: Removed manual Babel trigger (Babel will automatically process the script[type="text/babel"] block)
     </script>
 
     <!-- Main Application Code (JSX) -->
     <script type="text/babel" id="app-script">
-        // The entire content of BookRecommender.jsx is now embedded here.
         
         // --- Configuration and Constants ---
 
         // Global variables provided by the environment (MANDATORY USE)
-        // NOTE: These are now accessed from the global 'window' object, set in the module script above.
         const appId = typeof window.__app_id !== 'undefined' ? window.__app_id : 'default-app-id';
         const firebaseConfig = typeof window.__firebase_config !== 'undefined' ? JSON.parse(window.__firebase_config) : {};
         const initialAuthToken = typeof window.__initial_auth_token !== 'undefined' ? window.__initial_auth_token : null;
         const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=`;
+        
+        // STRENGTHENED SYSTEM INSTRUCTION
         const GEMINI_SYSTEM_INSTRUCTION = `You are an expert semantic book recommender. Your task is to analyze a user's book query and select the top 3 most semantically similar books from the provided list, considering their description, category, and emotional tone. 
-        Your response MUST be a JSON array of up to 3 book objects, containing ONLY the 'id', 'title', and 'description' keys. Do not include any other text or explanation.`;
+        Your response MUST be a JSON array of up to 3 book objects, containing ONLY the 'id', 'title', and 'description' keys. DO NOT INCLUDE ANY OTHER TEXT, EXPLANATION, GREETING, OR MARKDOWN OUTSIDE OF THE JSON ARRAY ITSELF.`;
 
         const SAMPLE_BOOKS = [
         { id: 1, title: "The Obsidian Star", author: "A. J. Thorne", description: "A dark fantasy where a reluctant hero must master forbidden magic to stop a corrupt empire. Themes of loss and revenge.", category: "Fantasy", tone: "Suspenseful" },
@@ -82,6 +79,9 @@
         const CATEGORY_OPTIONS = ['All', 'Fantasy', 'Non-Fiction', 'Thriller', 'Sci-Fi'];
         const TONE_OPTIONS = ['All', 'Suspenseful', 'Calm', 'Surprising', 'Happy'];
 
+        // Helper function for delay
+        const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
 
         // --- Firebase & Auth Setup Hook ---
 
@@ -94,12 +94,14 @@
         const [db, setDb] = useState(null);
         const [auth, setAuth] = useState(null);
         const [userId, setUserId] = useState(null);
+        const [isAuthReady, setIsAuthReady] = useState(false);
 
         useEffect(() => {
             try {
             if (Object.keys(firebaseConfig).length === 0) {
                 console.warn("Firebase config is empty. History saving is disabled.");
                 setUserId('disabled-local-user'); // Allow app to render, but queries will fail
+                setIsAuthReady(true);
                 return;
             }
 
@@ -125,6 +127,7 @@
             const unsubscribe = onAuthStateChanged(authInstance, (user) => {
                 // Ensure userId is only set to the official UID or null (loading)
                 setUserId(user ? user.uid : null);
+                setIsAuthReady(true);
             });
 
             authenticate();
@@ -134,11 +137,11 @@
             }
         }, []);
 
-        return { db, auth, userId, isAuthReady: !!userId };
+        return { db, auth, userId, isAuthReady };
         };
 
         // --- History Hook ---
-        const useHistory = (db, userId) => {
+        const useHistory = (db, userId, isAuthReady) => {
         const { collection, query, limit, onSnapshot, serverTimestamp, orderBy, addDoc } = window.firebase;
         const useState = window.useState;
         const useEffect = window.useEffect;
@@ -147,12 +150,11 @@
         const [history, setHistory] = useState([]);
 
         useEffect(() => {
-            if (!db || !userId) return;
+            if (!db || !userId || !isAuthReady) return;
 
             // Private collection path for user history
             const historyPath = `/artifacts/${appId}/users/${userId}/recommendation_queries`;
             
-            // NOTE: orderBy is used for client-side sorting only
             const q = query(collection(db, historyPath), orderBy("timestamp", "desc"), limit(5));
 
             const unsubscribe = onSnapshot(q, (snapshot) => {
@@ -166,11 +168,11 @@
             });
 
             return () => unsubscribe();
-        }, [db, userId]);
+        }, [db, userId, isAuthReady]);
 
         const saveQuery = useCallback(async (queryText, category, tone) => {
             if (!db || !userId) {
-            console.error("Database not ready or user not authenticated.");
+            // console.error("Database not ready or user not authenticated.");
             return;
             }
             try {
@@ -194,7 +196,7 @@
         const { useMemo } = window.React;
         const { useState, useEffect, useCallback } = window;
         const { db, userId, isAuthReady } = useFirebase();
-        const { history, saveQuery } = useHistory(db, userId);
+        const { history, saveQuery } = useHistory(db, userId, isAuthReady);
 
         const [queryText, setQueryText] = useState('');
         const [categoryFilter, setCategoryFilter] = useState('All');
@@ -202,6 +204,61 @@
         const [recommendations, setRecommendations] = useState([]);
         const [isLoading, setIsLoading] = useState(false);
         const [errorMessage, setErrorMessage] = useState('');
+
+        // Function to handle the API call and retry logic (exponential backoff)
+        const fetchRecommendations = useCallback(async (payload, maxRetries = 3) => {
+            for (let attempt = 0; attempt < maxRetries; attempt++) {
+                try {
+                    const response = await fetch(API_URL, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    const result = await response.json();
+                    const jsonText = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+                    if (!jsonText) {
+                        if (attempt < maxRetries - 1) {
+                            await delay(Math.pow(2, attempt) * 1000); // Exponential backoff
+                            continue; // Retry
+                        }
+                        throw new Error("LLM failed to return a valid response after retries.");
+                    }
+
+                    // 1. Parse the JSON from the LLM
+                    let parsedJson;
+                    try {
+                        // Attempt to clean up common malformed JSON issues (e.g., surrounding text or markdown block fences)
+                        const cleanedJsonText = jsonText.replace(/^```json\s*/, '').replace(/\s*```$/, '').trim();
+                        parsedJson = JSON.parse(cleanedJsonText);
+                    } catch (e) {
+                        if (attempt < maxRetries - 1) {
+                            console.warn(`JSON parsing failed (Attempt ${attempt + 1}). Retrying...`);
+                            await delay(Math.pow(2, attempt) * 1000); // Exponential backoff
+                            continue; // Retry
+                        }
+                        throw new Error("LLM returned malformed JSON after retries.");
+                    }
+
+                    // 2. Extract IDs and map to full book objects
+                    const recommendedIds = parsedJson.map(book => book.id).filter(id => id !== undefined);
+                    const finalRecommendations = SAMPLE_BOOKS.filter(book => recommendedIds.includes(book.id));
+                    
+                    return finalRecommendations;
+
+                } catch (error) {
+                    if (attempt < maxRetries - 1) {
+                        console.warn(`API call failed (Attempt ${attempt + 1}). Retrying...`);
+                        await delay(Math.pow(2, attempt) * 1000); // Exponential backoff
+                        continue;
+                    }
+                    throw error;
+                }
+            }
+            return [];
+        }, []);
+
 
         // Function to perform the LLM-based semantic search
         const recommendBooks = async (e) => {
@@ -211,8 +268,10 @@
             return;
             }
             setErrorMessage('');
+            setRecommendations([]);
             setIsLoading(true);
 
+            // 1. Client-side filter applied before sending to LLM
             const filteredBooks = SAMPLE_BOOKS.filter(book =>
             (categoryFilter === 'All' || book.category === categoryFilter) &&
             (toneFilter === 'All' || book.tone === toneFilter)
@@ -264,45 +323,24 @@
             };
 
             try {
-            const response = await fetch(API_URL, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
+                // Use the retry function to fetch recommendations
+                const finalRecommendations = await fetchRecommendations(payload);
+                
+                if (finalRecommendations.length === 0 && filteredBooks.length > 0) {
+                     setErrorMessage("The model couldn't find relevant books from the available list.");
+                } else {
+                     setRecommendations(finalRecommendations);
+                }
 
-            const result = await response.json();
-            const jsonText = result?.candidates?.[0]?.content?.parts?.[0]?.text;
-
-            if (!jsonText) {
-                setErrorMessage("LLM failed to return a valid JSON response. Try again.");
-                return;
-            }
-
-            // 1. Parse the JSON from the LLM
-            let recommendedIds = [];
-            try {
-                const parsedJson = JSON.parse(jsonText);
-                // Extract IDs from the LLM response
-                recommendedIds = parsedJson.map(book => book.id).filter(id => id !== undefined);
-            } catch (e) {
-                console.error("Error parsing LLM JSON response:", e, jsonText);
-                setErrorMessage("LLM returned malformed JSON. Please check console.");
-                return;
-            }
-
-            // 2. Map the IDs back to the full book objects
-            const finalRecommendations = SAMPLE_BOOKS.filter(book => recommendedIds.includes(book.id));
-
-            setRecommendations(finalRecommendations);
-
-            // Save to history (non-blocking)
-            saveQuery(queryText, categoryFilter, toneFilter);
+                // Save to history (non-blocking)
+                saveQuery(queryText, categoryFilter, toneFilter);
 
             } catch (error) {
-            console.error("API Call Error:", error);
-            setErrorMessage("An error occurred during the recommendation process. Check console for details.");
+                console.error("Recommendation Process Error:", error);
+                // Display the user-friendly error message from the retry logic
+                setErrorMessage(`Recommendation failed: ${error.message}`);
             } finally {
-            setIsLoading(false);
+                setIsLoading(false);
             }
         };
 
@@ -325,6 +363,8 @@
                         setQueryText(item.query);
                         setCategoryFilter(item.category);
                         setToneFilter(item.tone);
+                        setErrorMessage('');
+                        setRecommendations([]);
                     }}
                     >
                     <p className="text-sm font-medium text-white line-clamp-2">
@@ -470,7 +510,7 @@
         );
         };
 
-        // Render the application to the DOM using React 18's createRoot API (Fix for warning)
+        // Render the application to the DOM using React 18's createRoot API
         const rootElement = document.getElementById('root');
         const root = ReactDOM.createRoot(rootElement);
         root.render(<App />);
