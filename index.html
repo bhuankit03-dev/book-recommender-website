@@ -32,7 +32,19 @@
 
         // IMPORTANT: These variables are required by the embedded React code.
         window.__app_id = "recommender-app-public-id";
-        window.__firebase_config = JSON.stringify({}); // Placeholder: use your actual config object here
+
+        // 🚨 ACTION REQUIRED (1/2): Replace {} with your Firebase configuration object
+        // Example: {apiKey: "AIza...", authDomain: "...", projectId: "..."}
+        window.__firebase_config = JSON.stringify({
+  apiKey: "AIzaSyCn-GsUfr-GoJOiC9IGAljJyp_SO2kDZyw",
+  authDomain: "book-recommender-system-65a31.firebaseapp.com",
+  projectId: "book-recommender-system-65a31",
+  storageBucket: "book-recommender-system-65a31.firebasestorage.app",
+  messagingSenderId: "434102354126",
+  appId: "1:434102354126:web:37bb5473e91ae4b364909f",
+  measurementId: "G-EVWR577LB5"
+}); 
+
         window.__initial_auth_token = null; // We will default to anonymous sign-in
 
         // Make Firebase functions available globally
@@ -60,11 +72,13 @@
         const appId = typeof window.__app_id !== 'undefined' ? window.__app_id : 'default-app-id';
         const firebaseConfig = typeof window.__firebase_config !== 'undefined' ? JSON.parse(window.__firebase_config) : {};
         const initialAuthToken = typeof window.__initial_auth_token !== 'undefined' ? window.__initial_auth_token : null;
-        const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=`;
         
-        // STRENGTHENED SYSTEM INSTRUCTION
-        const GEMINI_SYSTEM_INSTRUCTION = `You are an expert semantic book recommender. Your task is to analyze a user's book query and select the top 3 most semantically similar books from the provided list, considering their description, category, and emotional tone. 
-        Your response MUST be a JSON array of up to 3 book objects, containing ONLY the 'id', 'title', and 'description' keys. DO NOT INCLUDE ANY OTHER TEXT, EXPLANATION, GREETING, OR MARKDOWN OUTSIDE OF THE JSON ARRAY ITSELF.`;
+        // 🚨 ACTION REQUIRED (2/2): Insert your Gemini API Key here.
+        const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=AIzaSyCKbEfIZ2ILstZFi-H-M3lMp68o603KQyo`;
+        
+        // STRENGTHENED SYSTEM INSTRUCTION (Focus on ID and title retrieval only)
+        const GEMINI_SYSTEM_INSTRUCTION = `You are an expert book recommender. Your task is to select the top 3 most semantically similar books from the provided list based on the user's query and filters. 
+        Your response MUST be ONLY the requested JSON array of up to 3 book objects, containing ONLY the 'id', 'title', and 'description' keys. DO NOT INCLUDE ANY MARKDOWN FENCE (e.g., \`\`\`json), EXPLANATION, GREETING, OR OTHER TEXT.`;
 
         const SAMPLE_BOOKS = [
         { id: 1, title: "The Obsidian Star", author: "A. J. Thorne", description: "A dark fantasy where a reluctant hero must master forbidden magic to stop a corrupt empire. Themes of loss and revenge.", category: "Fantasy", tone: "Suspenseful" },
@@ -230,6 +244,7 @@
                     let parsedJson;
                     try {
                         // Attempt to clean up common malformed JSON issues (e.g., surrounding text or markdown block fences)
+                        // This cleanup step is CRITICAL for handling bad LLM output
                         const cleanedJsonText = jsonText.replace(/^```json\s*/, '').replace(/\s*```$/, '').trim();
                         parsedJson = JSON.parse(cleanedJsonText);
                     } catch (e) {
@@ -238,11 +253,13 @@
                             await delay(Math.pow(2, attempt) * 1000); // Exponential backoff
                             continue; // Retry
                         }
-                        throw new Error("LLM returned malformed JSON after retries.");
+                        throw new Error("LLM returned malformed JSON after retries. Final JSON check failed.");
                     }
 
                     // 2. Extract IDs and map to full book objects
-                    const recommendedIds = parsedJson.map(book => book.id).filter(id => id !== undefined);
+                    // Ensure parsedJson is an array before mapping
+                    const arrayResult = Array.isArray(parsedJson) ? parsedJson : [];
+                    const recommendedIds = arrayResult.map(book => book.id).filter(id => id !== undefined);
                     const finalRecommendations = SAMPLE_BOOKS.filter(book => recommendedIds.includes(book.id));
                     
                     return finalRecommendations;
@@ -284,21 +301,20 @@
             return;
             }
 
-            // Prepare the list of available books for the prompt
+            // Prepare the simplified list of available books for the prompt
+            // Only send ID, title, and description to reduce clutter and confusion for the LLM
             const bookListForLLM = filteredBooks.map(book => ({
-            id: book.id,
-            title: book.title,
-            description: book.description,
-            category: book.category,
-            tone: book.tone
+                id: book.id,
+                title: book.title,
+                description: book.description,
+                category: book.category, // Include category/tone for better LLM matching
+                tone: book.tone
             }));
 
             const userPrompt = `
             User Query: ${queryText}
-            Category Filter: ${categoryFilter}
-            Sentiment Filter: ${toneFilter}
             
-            Available Books:
+            Based on the query, select the best matches from this list of books:
             ${JSON.stringify(bookListForLLM)}
             `;
 
