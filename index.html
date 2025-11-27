@@ -65,7 +65,7 @@
         const appId = typeof window.__app_id !== 'undefined' ? window.__app_id : 'default-app-id';
         const firebaseConfig = typeof window.__firebase_config !== 'undefined' ? JSON.parse(window.__firebase_config) : {};
         const initialAuthToken = typeof window.__initial_auth_token !== 'undefined' ? window.__initial_auth_token : null;
-        const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=`;
+        const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=AIzaSyCTCLOnZANQrOHW840hhPnvYr_hCTNlO5Q`;
         const GEMINI_SYSTEM_INSTRUCTION = `You are an expert semantic book recommender. Your task is to analyze a user's book query and select the top 3 most semantically similar books from the provided list, considering their description, category, and emotional tone. 
         Your response MUST be a JSON array of up to 3 book objects, containing ONLY the 'id', 'title', and 'description' keys. Do not include any other text or explanation.`;
 
@@ -477,4 +477,5 @@
 
     </script>
 </body>
+
 </html>
