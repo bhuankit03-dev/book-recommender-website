@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Semantic Book Recommender</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Load React and ReactDOM from CDN -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <!-- Load Babel to process the JSX directly in the browser -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+        /* Optional: Set a clean font */
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+    </style>
+</head>
+<body class="bg-gray-900">
+    <div id="root">
+        <!-- React application will be mounted here -->
+    </div>
+
+    <!-- Firebase CDN Imports -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, query, limit, onSnapshot, serverTimestamp, orderBy, addDoc, doc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // IMPORTANT: These variables are required by the embedded React code.
+        // On a public deployment, you would replace this with your actual Firebase config.
+        window.__app_id = "recommender-app-public-id";
+        window.__firebase_config = JSON.stringify({}); // Placeholder: use your actual config object here
+        window.__initial_auth_token = null; // We will default to anonymous sign-in
+
+        // Make Firebase functions available globally or pass them to the React component scope 
+        // through the standard window object for the script below to access.
+        window.firebase = { 
+            initializeApp, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, 
+            getFirestore, collection, query, limit, onSnapshot, serverTimestamp, orderBy, addDoc, doc
+        };
+        
+        // Expose React hooks for the JSX script to use
+        window.React = React;
+        window.useState = React.useState;
+        window.useEffect = React.useEffect;
+        window.useCallback = React.useCallback;
+        window.useMemo = React.useMemo;
+        window.useRef = React.useRef;
+
+        // NOTE: Removed manual Babel trigger (Babel will automatically process the script[type="text/babel"] block)
+    </script>
+
+    <!-- Main Application Code (JSX) -->
+    <script type="text/babel" id="app-script">
+        // The entire content of BookRecommender.jsx is now embedded here.
+        
+        // --- Configuration and Constants ---
+
+        // Global variables provided by the environment (MANDATORY USE)
+        // NOTE: These are now accessed from the global 'window' object, set in the module script above.
+        const appId = typeof window.__app_id !== 'undefined' ? window.__app_id : 'default-app-id';
+        const firebaseConfig = typeof window.__firebase_config !== 'undefined' ? JSON.parse(window.__firebase_config) : {};
+        const initialAuthToken = typeof window.__initial_auth_token !== 'undefined' ? window.__initial_auth_token : null;
+        const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=`;
+        const GEMINI_SYSTEM_INSTRUCTION = `You are an expert semantic book recommender. Your task is to analyze a user's book query and select the top 3 most semantically similar books from the provided list, considering their description, category, and emotional tone. 
+        Your response MUST be a JSON array of up to 3 book objects, containing ONLY the 'id', 'title', and 'description' keys. Do not include any other text or explanation.`;
+
+        const SAMPLE_BOOKS = [
+        { id: 1, title: "The Obsidian Star", author: "A. J. Thorne", description: "A dark fantasy where a reluctant hero must master forbidden magic to stop a corrupt empire. Themes of loss and revenge.", category: "Fantasy", tone: "Suspenseful" },
+        { id: 2, title: "Silicon Valley Zen", author: "L. K. Patel", description: "A non-fiction guide to integrating mindfulness and productivity in the high-stress tech world. Focuses on mental well-being.", category: "Non-Fiction", tone: "Calm" },
+        { id: 3, title: "The Clockwork Detective", author: "V. R. Steam", description: "A thrilling Victorian mystery set in a steampunk London where a detective hunts a cunning saboteur.", category: "Thriller", tone: "Surprising" },
+        { id: 4, title: "Coral Reef Guardians", author: "Dr. E. Marine", description: "A beautiful, non-fiction photographic journey exploring ocean conservation and marine biology. Educational and inspiring.", category: "Non-Fiction", tone: "Happy" },
+        { id: 5, title: "Echoes of the Void", author: "J. S. Wells", description: "A deep space opera where two rival starships form an uneasy alliance against an unknown existential threat. Full of action and political intrigue.", category: "Sci-Fi", tone: "Suspenseful" },
+        { id: 6, title: "A Chef's Memoir", author: "M. E. Cuisin", description: "The true story of a young chef's rise from street food stall to Michelin-star restaurant. A story of passion and persistence.", category: "Non-Fiction", "tone": "Happy" },
+        { id: 7, title: "The Last Scroll", author: "T. R. Griffin", description: "A historical thriller about a secret society racing to find an ancient manuscript that could rewrite history.", category: "Thriller", tone: "Surprising" },
+        ];
+
+        const CATEGORY_OPTIONS = ['All', 'Fantasy', 'Non-Fiction', 'Thriller', 'Sci-Fi'];
+        const TONE_OPTIONS = ['All', 'Suspenseful', 'Calm', 'Surprising', 'Happy'];
+
+
+        // --- Firebase & Auth Setup Hook ---
+
+        const useFirebase = () => {
+        // Access Firebase functions from the global window object
+        const { initializeApp, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, getFirestore } = window.firebase;
+        const useState = window.useState;
+        const useEffect = window.useEffect;
+
+        const [db, setDb] = useState(null);
+        const [auth, setAuth] = useState(null);
+        const [userId, setUserId] = useState(null);
+
+        useEffect(() => {
+            try {
+            if (Object.keys(firebaseConfig).length === 0) {
+                console.warn("Firebase config is empty. History saving is disabled.");
+                setUserId('disabled-local-user'); // Allow app to render, but queries will fail
+                return;
+            }
+
+            const app = initializeApp(firebaseConfig);
+            const firestore = getFirestore(app);
+            const authInstance = getAuth(app);
+            setDb(firestore);
+            setAuth(authInstance);
+
+            // Sign in anonymously if no token, otherwise use custom token
+            const authenticate = async () => {
+                try {
+                if (initialAuthToken) {
+                    await signInWithCustomToken(authInstance, initialAuthToken);
+                } else {
+                    await signInAnonymously(authInstance);
+                }
+                } catch (error) {
+                console.error("Firebase Auth Error:", error);
+                }
+            };
+
+            const unsubscribe = onAuthStateChanged(authInstance, (user) => {
+                // Ensure userId is only set to the official UID or null (loading)
+                setUserId(user ? user.uid : null);
+            });
+
+            authenticate();
+            return () => unsubscribe();
+            } catch (e) {
+            console.error("Failed to initialize Firebase:", e);
+            }
+        }, []);
+
+        return { db, auth, userId, isAuthReady: !!userId };
+        };
+
+        // --- History Hook ---
+        const useHistory = (db, userId) => {
+        const { collection, query, limit, onSnapshot, serverTimestamp, orderBy, addDoc } = window.firebase;
+        const useState = window.useState;
+        const useEffect = window.useEffect;
+        const useCallback = window.useCallback;
+
+        const [history, setHistory] = useState([]);
+
+        useEffect(() => {
+            if (!db || !userId) return;
+
+            // Private collection path for user history
+            const historyPath = `/artifacts/${appId}/users/${userId}/recommendation_queries`;
+            
+            // NOTE: orderBy is used for client-side sorting only
+            const q = query(collection(db, historyPath), orderBy("timestamp", "desc"), limit(5));
+
+            const unsubscribe = onSnapshot(q, (snapshot) => {
+            const historyList = snapshot.docs.map(doc => ({
+                id: doc.id,
+                ...doc.data()
+            }));
+            setHistory(historyList);
+            }, (error) => {
+            console.error("Error listening to history:", error);
+            });
+
+            return () => unsubscribe();
+        }, [db, userId]);
+
+        const saveQuery = useCallback(async (queryText, category, tone) => {
+            if (!db || !userId) {
+            console.error("Database not ready or user not authenticated.");
+            return;
+            }
+            try {
+            const historyPath = `/artifacts/${appId}/users/${userId}/recommendation_queries`;
+            await addDoc(collection(db, historyPath), {
+                query: queryText,
+                category: category,
+                tone: tone,
+                timestamp: serverTimestamp(),
+            });
+            } catch (e) {
+            console.error("Error adding document: ", e);
+            }
+        }, [db, userId]);
+
+        return { history, saveQuery };
+        };
+
+        // --- Main Application Component ---
+        const App = () => {
+        const { useMemo } = window.React;
+        const { useState, useEffect, useCallback } = window;
+        const { db, userId, isAuthReady } = useFirebase();
+        const { history, saveQuery } = useHistory(db, userId);
+
+        const [queryText, setQueryText] = useState('');
+        const [categoryFilter, setCategoryFilter] = useState('All');
+        const [toneFilter, setToneFilter] = useState('All');
+        const [recommendations, setRecommendations] = useState([]);
+        const [isLoading, setIsLoading] = useState(false);
+        const [errorMessage, setErrorMessage] = useState('');
+
+        // Function to perform the LLM-based semantic search
+        const recommendBooks = async (e) => {
+            e.preventDefault();
+            if (!queryText.trim()) {
+            setErrorMessage("Please enter a description for your book.");
+            return;
+            }
+            setErrorMessage('');
+            setIsLoading(true);
+
+            const filteredBooks = SAMPLE_BOOKS.filter(book =>
+            (categoryFilter === 'All' || book.category === categoryFilter) &&
+            (toneFilter === 'All' || book.tone === toneFilter)
+            );
+
+            if (filteredBooks.length === 0) {
+            setRecommendations([]);
+            setErrorMessage("No books match the current filters. Please adjust them.");
+            setIsLoading(false);
+            return;
+            }
+
+            // Prepare the list of available books for the prompt
+            const bookListForLLM = filteredBooks.map(book => ({
+            id: book.id,
+            title: book.title,
+            description: book.description,
+            category: book.category,
+            tone: book.tone
+            }));
+
+            const userPrompt = `
+            User Query: ${queryText}
+            Category Filter: ${categoryFilter}
+            Sentiment Filter: ${toneFilter}
+            
+            Available Books:
+            ${JSON.stringify(bookListForLLM)}
+            `;
+
+            const payload = {
+            contents: [{ parts: [{ text: userPrompt }] }],
+            systemInstruction: { parts: [{ text: GEMINI_SYSTEM_INSTRUCTION }] },
+            generationConfig: {
+                responseMimeType: "application/json",
+                responseSchema: {
+                type: "ARRAY",
+                items: {
+                    type: "OBJECT",
+                    properties: {
+                    id: { type: "INTEGER" },
+                    title: { type: "STRING" },
+                    description: { type: "STRING" },
+                    },
+                    propertyOrdering: ["id", "title", "description"],
+                }
+            }
+            }
+            };
+
+            try {
+            const response = await fetch(API_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            const result = await response.json();
+            const jsonText = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+            if (!jsonText) {
+                setErrorMessage("LLM failed to return a valid JSON response. Try again.");
+                return;
+            }
+
+            // 1. Parse the JSON from the LLM
+            let recommendedIds = [];
+            try {
+                const parsedJson = JSON.parse(jsonText);
+                // Extract IDs from the LLM response
+                recommendedIds = parsedJson.map(book => book.id).filter(id => id !== undefined);
+            } catch (e) {
+                console.error("Error parsing LLM JSON response:", e, jsonText);
+                setErrorMessage("LLM returned malformed JSON. Please check console.");
+                return;
+            }
+
+            // 2. Map the IDs back to the full book objects
+            const finalRecommendations = SAMPLE_BOOKS.filter(book => recommendedIds.includes(book.id));
+
+            setRecommendations(finalRecommendations);
+
+            // Save to history (non-blocking)
+            saveQuery(queryText, categoryFilter, toneFilter);
+
+            } catch (error) {
+            console.error("API Call Error:", error);
+            setErrorMessage("An error occurred during the recommendation process. Check console for details.");
+            } finally {
+            setIsLoading(false);
+            }
+        };
+
+        const MemoizedHistory = useMemo(() => (
+            <div className="bg-white/5 p-4 rounded-xl h-full overflow-y-auto">
+            <h3 className="text-lg font-semibold text-indigo-300 mb-3 border-b border-indigo-500/30 pb-1">
+                Your Recent Searches
+            </h3>
+            {!isAuthReady ? (
+                <p className="text-sm text-gray-400 animate-pulse">Initializing user session...</p>
+            ) : history.length === 0 ? (
+                <p className="text-sm text-gray-400">Search history will appear here.</p>
+            ) : (
+                <div className="space-y-3">
+                {history.map((item, index) => (
+                    <div
+                    key={item.id}
+                    className="p-3 bg-white/10 rounded-lg hover:bg-white/20 transition cursor-pointer"
+                    onClick={() => {
+                        setQueryText(item.query);
+                        setCategoryFilter(item.category);
+                        setToneFilter(item.tone);
+                    }}
+                    >
+                    <p className="text-sm font-medium text-white line-clamp-2">
+                        "{item.query}"
+                    </p>
+                    <div className="flex text-xs space-x-2 mt-1">
+                        <span className="bg-indigo-600/50 px-2 py-0.5 rounded-full text-indigo-200">
+                        {item.category}
+                        </span>
+                        <span className="bg-pink-600/50 px-2 py-0.5 rounded-full text-pink-200">
+                        {item.tone}
+                        </span>
+                    </div>
+                    </div>
+                ))}
+                </div>
+            )}
+            {userId && <p className="mt-4 text-xs text-gray-500 truncate">User ID: {userId}</p>}
+            </div>
+        ), [history, isAuthReady, userId, setQueryText, setCategoryFilter, setToneFilter]);
+
+
+        return (
+            <div className="min-h-screen bg-gray-900 text-white p-4 sm:p-8 font-sans">
+            <div className="max-w-6xl mx-auto">
+                <header className="mb-8 border-b border-indigo-700 pb-4">
+                <h1 className="text-3xl sm:text-4xl font-extrabold text-indigo-400">
+                    Semantic Book Recommender
+                </h1>
+                <p className="text-indigo-200/80 mt-1">
+                    Find your next read using LLM-powered semantic search.
+                </p>
+                </header>
+
+                <main className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                {/* LEFT COLUMN: Input Form and Filters */}
+                <div className="lg:col-span-2 space-y-8">
+                    <div className="bg-gray-800 p-6 sm:p-8 rounded-2xl shadow-xl border border-gray-700">
+                    <h2 className="text-2xl font-bold mb-4 text-white">Your Book Description</h2>
+                    <form onSubmit={recommendBooks} className="space-y-5">
+                        {/* Query Input */}
+                        <textarea
+                        value={queryText}
+                        onChange={(e) => {
+                            setQueryText(e.target.value);
+                            setErrorMessage('');
+                        }}
+                        placeholder="e.g., A gripping tale about an interdimensional traveler who loses his memory and has to solve his own past to save the future."
+                        rows="4"
+                        className="w-full p-4 rounded-xl bg-gray-700 border border-gray-600 text-white placeholder-gray-400 focus:ring-indigo-500 focus:border-indigo-500 transition shadow-inner"
+                        />
+
+                        {/* Filters (Category and Tone) */}
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <div>
+                            <label htmlFor="category" className="block text-sm font-medium text-gray-300 mb-1">
+                            Filter by Category
+                            </label>
+                            <select
+                            id="category"
+                            value={categoryFilter}
+                            onChange={(e) => setCategoryFilter(e.target.value)}
+                            className="w-full p-3 rounded-xl bg-gray-700 border border-gray-600 text-white focus:ring-indigo-500 focus:border-indigo-500 transition appearance-none"
+                            >
+                            {CATEGORY_OPTIONS.map(opt => (
+                                <option key={opt} value={opt}>{opt}</option>
+                            ))}
+                            </select>
+                        </div>
+                        <div>
+                            <label htmlFor="tone" className="block text-sm font-medium text-gray-300 mb-1">
+                            Filter by Emotional Tone
+                            </label>
+                            <select
+                            id="tone"
+                            value={toneFilter}
+                            onChange={(e) => setToneFilter(e.target.value)}
+                            className="w-full p-3 rounded-xl bg-gray-700 border border-gray-600 text-white focus:ring-indigo-500 focus:border-indigo-500 transition appearance-none"
+                            >
+                            {TONE_OPTIONS.map(opt => (
+                                <option key={opt} value={opt}>{opt}</option>
+                            ))}
+                            </select>
+                        </div>
+                        </div>
+
+                        {/* Submit Button */}
+                        <button
+                        type="submit"
+                        disabled={isLoading || !isAuthReady}
+                        className="w-full py-3 px-6 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-xl shadow-lg shadow-indigo-500/30 transition duration-200 ease-in-out disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center"
+                        >
+                        {isLoading ? (
+                            <svg className="animate-spin h-5 w-5 text-white mr-3" viewBox="0 0 24 24">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                            </svg>
+                        ) : (
+                            'Get Recommendations'
+                        )}
+                        </button>
+                        
+                        {errorMessage && (
+                        <div className="p-3 bg-red-800/50 text-red-300 rounded-xl text-sm font-medium">
+                            {errorMessage}
+                        </div>
+                        )}
+                    </form>
+                    </div>
+
+                    {/* Recommendation Results */}
+                    <div className="space-y-4">
+                    <h2 className="text-2xl font-bold text-white border-b border-gray-700 pb-2">
+                        Recommended Books
+                    </h2>
+                    {recommendations.length > 0 ? (
+                        <div className="space-y-6">
+                        {recommendations.map((book) => (
+                            <div key={book.id} className="bg-gray-800 p-5 rounded-2xl shadow-lg border border-indigo-500/50 transition hover:border-indigo-500">
+                            <h3 className="text-xl font-semibold text-indigo-400">{book.title}</h3>
+                            <p className="text-sm text-gray-400 mb-2">
+                                {book.author} | {book.category} | Tone: {book.tone}
+                            </p>
+                            <p className="text-gray-300 mt-3">{book.description}</p>
+                            </div>
+                        ))}
+                        </div>
+                    ) : !isLoading && queryText && !errorMessage && (
+                        <div className="p-5 bg-gray-800/50 rounded-xl text-gray-400">
+                            Enter a description and click "Get Recommendations" to start your search!
+                        </div>
+                    )}
+                    </div>
+                </div>
+
+                {/* RIGHT COLUMN: Search History */}
+                <div className="lg:col-span-1 h-[70vh] lg:h-auto">
+                    {MemoizedHistory}
+                </div>
+                </main>
+            </div>
+            </div>
+        );
+        };
+
+        // Render the application to the DOM using React 18's createRoot API (Fix for warning)
+        const rootElement = document.getElementById('root');
+        const root = ReactDOM.createRoot(rootElement);
+        root.render(<App />);
+
+    </script>
+</body>
+</html>
